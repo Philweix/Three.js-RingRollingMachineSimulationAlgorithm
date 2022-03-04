@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>辗环过程仿真算法4.0</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="./css/main.css">
+    <style>
+        body {
+            background-color: #f0f0f0;
+            color: black;
+        }
+    </style>
+    <script type="text/javascript" src="./js/xlsx.core.min.js"></script>
+    <script type="text/javascript" src="./js/jquery.js"></script>
+    <script src="./js/mqttws31.js"></script>
+    <script src="./js/mqttServer.js" type="module"></script>
+</head>
+
+<body>
+
+<div style="position: absolute;margin-left: 25px;margin-top: 20px">
+    <div>
+        <label style="font-size: 24px">设定锥体参数:</label>
+        <label style="margin-left: 20px; font-size: 22px">半径</label>
+        <input id="coneRadius" type="number" value="0.28" style="width:80px"/>
+        <label style="margin-left: 20px; font-size: 22px">高度</label>
+        <input id="coneHeight" type="number" value="0.8"  style="width:80px"/>
+        <button id="loadingCone" style="margin-left: 20px">加载锥体</button>
+    </div>
+    <div style="margin-top: 15px">
+        <button id="selectFile">读取表格加工数据</button>
+        <button id="loadTableData" style="margin-left: 20px">使用表格数据仿真</button>
+        <input type="file" id="file" style="display:none;" accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+    </div>
+    <div style="margin-top: 15px">
+        <button id="connectMqttServer">连接MQTT服务器</button>
+        <button id="mqttSimulation" style="margin-left: 20px">发送MQTT数据并仿真</button>
+    </div>
+    <div style="margin-top: 15px">
+        <button id="machining">动态演示</button>
+    </div>
+</div>
+
+<script type="module">
+    import * as THREE from './js/three.module.js';
+    import { OrbitControls } from './js/OrbitControls.js';
+
+
+    // MQTT部分
+    let userID = "admin";  //这个地方的userID 的作用是什么？
+    let mqttHost = '192.168.1.188'; // ip
+    let mqttPort = '8083'; // 端口
+    let mqttTimeout = 10000; // 超时
+    let reconnectAttempts = 5; //重连次数
+    let IsAllowConnect = true;
+    let mqttConnStatus = false;
+    let mqttClient;
+    // 订阅的信息
+    let mesClientTopicList = ['ringRollingMachine'];
+    let timeout = null;
+    let connectNum = 0;
+
+    //创建唯一UID
+    function makeUid() {
+        let text = "";
+        let possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345678910";
+        for (let i = 0; i < 10; i++) {
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        text = 'ScadaWeb_' + userID + '_' + text;
+        return text;
+    }
+    //MQTT-CLIENT连接函数
+    function StartMqttClient() {
+        try {
+            //判断是否支持HTML5
+            let support = "MozWebSocket" in window ? 'MozWebSocket' : ("WebSocket" in window ? 'WebSocket' : null);
+            if (support == null) {
+                console.log('NO SUPPORT H5!');
+                return;
+            }
+            try {
+                clearInterval(timeout);
+            } catch (exception) {
+                console.log('exception', exception);
+            }
+
+            let clientUId = makeUid();
+            mqttClient = new Paho.MQTT.Client(mqttHost, Number(mqttPort), "/mqtt", clientUId);
+            let options = {
+                invocationContext: { host: mqttHost, port: Number(mqttPort), path: "/mqtt", clientId: clientUId },
+                timeout: mqttTimeout,
+                keepAliveInterval: 15,
+                cleanSession: true,
+                useSSL: false,
+                onFailure:onFailure,
+                onSuccess:onConnected
+            };
+            mqttClient.connect(options);
+            mqttClient.onConnectionLost = onConnectionLost; //失去连接事件
+            mqttClient.onMessageArrived = onMessageArrived;//接受到数据事件
+        } catch(error) {
+            console.log(error);
+        }
+    }
+    //MQTT-CLIENT连接失败
+    function onFailure(e) {
+        console.log('连接失败，将进行重连',e);
+        if (IsAllowConnect) {
+            //重新连接,打开计时器
+            timeout = setTimeout(function () {
+                if(connectNum > reconnectAttempts) {
+                    clearInterval(timeout);
+                    CloseMqttClient();
+                } else {
+                    StartMqttClient();
+                    connectNum++;
+                }
+            }, 1000)
+        }
+    }
+    //MQTT-CLIENT关闭函数
+    function CloseMqttClient() {
+        try {
+            mqttConnStatus = false;
+            if (mqttClient) {
+                mqttClient.disconnect();
+                console.log('MQTT-CLIENT关闭!');
+                alert('MQTT-CLIENT关闭!');
+            }
+        } catch {}
+    }
+    //失去连接
+    function onConnectionLost(responseObject) {
+        console.log('MQTT失去连接!');
+        mqttConnStatus = false;
+        StartMqttClient();
+    }
+    //连接成功
+    function onConnected(reconnect, uri) {
+        mqttConnStatus = true;
+        console.log('MQTT连接成功！！');
+        //注册监控点
+        for (let i = 0; i < mesClientTopicList.length; i++) {
+            subscribe(mesClientTopicList[i].toString());
+        }
+    }
+    //发送消息函数功能
+    function sendMessage(topic, msg) {
+        try {
+            if (!mqttConnStatus) {
+                console.log('请先启动监控');
+                return;
+            }
+            let message = new Paho.MQTT.Message(msg);
+            message.destinationName = topic;
+            message.qos = 0;
+            message.retained = false;
+            mqttClient.send(message);
+        } catch (err) {
+            console.log(err);
+        }
+    }
+    //订阅主题函数功能
+    function subscribe(topic) {
+        try {
+            if (!mqttConnStatus) {
+                console.log('请先启动监控!');
+                return;
+            }
+            mqttClient.subscribe(topic, { qos: 0 });
+            console.log('MQTT主题订阅成功！！');
+        } catch (error){
+            console.log(error);
+        }
+    }
+    //取消订阅主题
+    function unsubscribe(topic) {
+        try {
+            if (mqttConnStatus) {
+                mqttClient.unsubscribe(topic, {
+                    invocationContext: { topic: topic }
+                })
+            }
+        } catch {}
+    }
+    //接收到消息
+    function onMessageArrived(message) {
+        try {
+            let topic = message.destinationName; //主题
+            let payload = JSON.parse(message.payloadString); //消息主体
+            loadMqttData(topic, payload);
+        } catch (err) {
+            console.log(err);
+        }
+    }
+    // 针对消息进行相应的操作
+    function loadMqttData(topic, payload) {
+        loadDataFun( Number(payload.ED) / 2000, Number(payload.WT)/1000, Number(payload.CH) / 1000, Number(payload.TM) );
+        mesh2.position.set(0, 0.15 + Number(payload.WT) / 1000, 0.5);
+        group1.position.set(0, Number(payload.ED) / 1000 + 0.5, Number(payload.CH) / 1000);
+        group2.position.set(0, Number(payload.ED) / 1000 + 0.5, 0);
+    }
+    function intervalSendMessage() {
+        if (mqttConnStatus === true) {
+            let i = 0;
+            setInterval(()=>{
+                if (i < data.length) {
+                    sendMessage('ringRollingMachine',JSON.stringify(data[i]));
+                    i ++;
+                } else {
+                    clearInterval();
+                }
+            },200)
+        } else {
+            alert('请先连接MQTT服务器!!');
+        }
+    }
+
+    // 发送MQTT数据并仿真
+    let mqttSimulationDom = document.getElementById('mqttSimulation');
+    mqttSimulationDom.addEventListener('click', intervalSendMessage, false);
+
+
+    // 选取excel表格
+    let selectFileDom = document.getElementById('selectFile');
+    selectFileDom.addEventListener('click', selectFile, false);
+
+    // 使用读取的表格数据进行仿真
+    let loadTableDataDom = document.getElementById('loadTableData');
+    loadTableDataDom.addEventListener('click', loadTableData, false);
+
+
+    // 连接MQTT服务器
+    let connectMqttServerDom = document.getElementById('connectMqttServer');
+    connectMqttServerDom.addEventListener('click', StartMqttClient, false);
+
+    // 根据参数加载锥体
+    let loadingConeDom = document.getElementById('loadingCone');
+    loadingConeDom.addEventListener('click', loadingCone, false);
+
+    // 利用假数据动态演示
+    let machiningDom = document.getElementById('machining');
+    machiningDom.addEventListener('click', dynamicChange, false);
+
+
+    // 一下是读取excel文件数据函数
+    let EDTable = []; // 外径数据
+    let WTTable = []; // 壁厚数据
+    let CHTable = []; // 高
+    let temperature = []; // 温度
+
+    function selectFile() {
+        document.getElementById('file').click();
+    }
+    // 读取表格
+    // 读取本地excel文件
+    function readWorkbookFromLocalFile(file, callback) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            let data = e.target.result;
+            let workbook = XLSX.read(data, {type: 'binary'});
+            if(callback) callback(workbook);
+        };
+        reader.readAsBinaryString(file);
+    }
+    $(function() {
+        document.getElementById('file').addEventListener('change', function(e) {
+            let files = e.target.files;
+            if(files.length === 0) return;
+            let f = files[0];
+            if(!/\.xlsx$/g.test(f.name)) {
+                alert('仅支持读取xlsx格式！');
+                return;
+            }
+            readWorkbookFromLocalFile(f, function(workbook) {
+                readWorkbook(workbook);
+            });
+        });
+    })
+    function readWorkbook(workbook) {
+        let sheetNames = workbook.SheetNames; // 工作表名称集合
+        let worksheet = workbook.Sheets[sheetNames[0]]; // 这里我们只读取第一张sheet
+        let i = 0;
+        for (let item in worksheet){
+            if ((item.slice(0,1) === 'B' &&  4 < Number(item.slice(1)))) {
+                EDTable.push(Number(worksheet[item].v));
+                i ++;
+            }
+            if ((item.slice(0,1) === 'C' &&  4 < Number(item.slice(1)))) {
+                WTTable.push(Number(worksheet[item].v));
+                i ++;
+            }
+            if ((item.slice(0,1) === 'D' &&  4 < Number(item.slice(1)))) {
+                CHTable.push(Number(worksheet[item].v));
+                i ++;
+            }
+            if ((item.slice(0,1) === 'T' &&  4 < Number(item.slice(1)))) {
+                temperature.push(Number(worksheet[item].v));
+                i ++;
+            }
+        }
+        alert('表格数据读取成功！');
+    }
+
+
+    let container, stats;
+    let camera, scene, renderer,controls;
+    let targetRotation = 0;
+    let windowHalfX = window.innerWidth / 2;
+    let group, group1, group2, mesh2, material;
+    let currentObject = null;
+    let mesh3;
+    let mesh4;
+    let arcShape = null;
+    let holePath = null;
+    const data = [
+        {ED: 1091.64, WT: 260.80, CH: 344.84, TM: 850},
+        {ED: 1096.80, WT: 259.42, CH: 343.84, TM: 852},
+        {ED: 1114.85, WT: 257.94, CH: 342.74, TM: 854},
+        {ED: 1119.61, WT: 256.60, CH: 341.66, TM: 856},
+        {ED: 1123.57, WT: 255.48, CH: 340.06, TM: 858},
+        {ED: 1125.66, WT: 253.54, CH: 337.66, TM: 860},
+        {ED: 1129.26, WT: 252.20, CH: 336.56, TM: 862},
+        {ED: 1141.55, WT: 250.82, CH: 335.58, TM: 864},
+        {ED: 1146.31, WT: 249.42, CH: 334.54, TM: 866},
+        {ED: 1156.81, WT: 247.34, CH: 332.10, TM: 868},
+        {ED: 1166.36, WT: 244.62, CH: 329.40, TM: 870},
+        {ED: 1187.95, WT: 240.64, CH: 326.84, TM: 872},
+        {ED: 1198.82, WT: 238.46, CH: 324.94, TM: 874},
+        {ED: 1210.74, WT: 235.96, CH: 323.22, TM: 876},
+        {ED: 1226.00, WT: 233.34, CH: 321.64, TM: 878},
+        {ED: 1246.83, WT: 229.60, CH: 318.78, TM: 880},
+        {ED: 1260.87, WT: 227.24, CH: 317.08, TM: 882},
+        {ED: 1276.19, WT: 224.76, CH: 315.38, TM: 884},
+        {ED: 1292.24, WT: 222.36, CH: 313.56, TM: 886},
+        {ED: 1313.80, WT: 218.66, CH: 310.68, TM: 888},
+        {ED: 1330.90, WT: 216.54, CH: 309.06, TM: 890},
+        {ED: 1348.09, WT: 214.28, CH: 307.26, TM: 892},
+        {ED: 1371.67, WT: 211.20, CH: 304.54, TM: 894},
+        {ED: 1385.85, WT: 208.84, CH: 302.78, TM: 896},
+        {ED: 1402.62, WT: 206.58, CH: 301.36, TM: 898},
+        {ED: 1427.63, WT: 204.56, CH: 300.12, TM: 900},
+        {ED: 1444.14, WT: 201.38, CH: 298.48, TM: 902},
+        {ED: 1462.90, WT: 199.04, CH: 297.20, TM: 904},
+        {ED: 1478.83, WT: 197.12, CH: 296.00, TM: 906},
+        {ED: 1502.71, WT: 194.04, CH: 294.56, TM: 908},
+        {ED: 1517.53, WT: 192.14, CH: 293.94, TM: 910},
+        {ED: 1535.48, WT: 190.06, CH: 293.42, TM: 912},
+        {ED: 1551.47, WT: 188.10, CH: 292.88, TM: 914},
+        {ED: 1575.46, WT: 185.54, CH: 292.04, TM: 916},
+        {ED: 1593.85, WT: 183.74, CH: 291.56, TM: 918},
+        {ED: 1610.49, WT: 181.62, CH: 291.14, TM: 920},
+        {ED: 1632.61, WT: 180.10, CH: 291.22, TM: 922},
+        {ED: 1652.67, WT: 179.20, CH: 290.54, TM: 924},
+        {ED: 1672.67, WT: 178.20, CH: 289.54, TM: 926},
+        {ED: 1692.67, WT: 177.20, CH: 288.54, TM: 928},
+        {ED: 1712.67, WT: 175.20, CH: 287.54, TM: 930},
+        {ED: 1732.67, WT: 173.20, CH: 286.54, TM: 932},
+        {ED: 1752.67, WT: 171.20, CH: 285.54, TM: 934},
+        {ED: 1772.67, WT: 169.20, CH: 284.54, TM: 936},
+        {ED: 1792.67, WT: 167.20, CH: 283.54, TM: 938},
+        {ED: 1812.67, WT: 165.20, CH: 282.54, TM: 940},
+        {ED: 1832.67, WT: 163.20, CH: 281.54, TM: 942},
+        {ED: 1852.67, WT: 161.20, CH: 280.54, TM: 944},
+        {ED: 1872.67, WT: 159.20, CH: 279.54, TM: 946},
+        {ED: 1892.67, WT: 157.20, CH: 278.54, TM: 948}
+    ]
+
+    init();
+    animate();
+    dynamicChange();
+
+    function dynamicChange() {
+        let dataee = numericalSplitProcessing(data);
+        let i = 0;
+        setInterval(()=>{
+            if (i < dataee.length) {
+                loadDataFun( dataee[i].ED / 2000, dataee[i].WT/1000, dataee[i].CH/1000, dataee[i].TM );
+                mesh2.position.set(0, 0.15 + dataee[i].WT/1000, 0.5);
+                group1.position.set(0, dataee[i].ED / 1000 + 0.5, dataee[i].CH/1000);
+                group2.position.set(0, dataee[i].ED / 1000 + 0.5, 0);
+                i ++;
+            } else {
+                clearInterval();
+            }
+        },100)
+    }
+    // 将0.5秒的距离做等距离差分
+    function numericalSplitProcessing(data) {
+        let newData = [];
+        let l = 0;
+        for (let i = 0; i < data.length - 1; i ++){
+            for ( let j = 1; j <= 5; j ++){
+                newData[l] = {};
+                newData[l]['ED'] = ((data[i + 1].ED - data[i].ED) * j / 5) + data[i].ED;
+                newData[l]['WT'] = ((data[i + 1].WT - data[i].WT) * j / 5) + data[i].WT;
+                newData[l]['CH'] = ((data[i + 1].CH - data[i].CH) * j / 5) + data[i].CH;
+                newData[l]['TM'] = ((data[i + 1].TM - data[i].TM) * j / 5) + data[i].TM;
+                l ++;
+            }
+        }
+        return newData;
+    }
+
+    function loadTableData() {
+        if( EDTable.length !== 0 && WTTable.length !== 0 && CHTable.length !== 0 ){
+            let i = 0;
+            setInterval(()=>{
+                if (i < EDTable.length) {
+                    loadDataFun( EDTable[i] / 2000, WTTable[i]/1000, CHTable[i] /1000, temperature[i] );
+                    mesh2.position.set(0, 0.15 + WTTable[i]/1000, 0.5);
+                    group1.position.set(0, EDTable[i] / 1000 + 0.5, CHTable[i]/1000);
+                    group2.position.set(0, EDTable[i] / 1000 + 0.5,);
+                    i ++;
+                } else {
+                    clearInterval();
+                }
+            },500)
+        } else {
+            alert('表格数据不全！请先读取excel表格！')
+        }
+    }
+
+    function loadDataFun(r1, wt, h1, tm = 850) {
+        if(parseFloat(wt) <0) {
+            alert('壁厚需要大于0！');
+            return;
+        }
+        if(parseFloat(wt) >= parseFloat(r1)) {
+            alert('壁厚不能大于等于外半径');
+            return;
+        }
+        if(parseFloat(r1) === 0) {
+            alert('外径需要大于0');
+            return;
+        }
+        if(parseFloat(h1) <= 0) {
+            alert('高度需要大于0');
+            return;
+        }
+        // 颜色渐变算法
+        // let R = 87 + Math.floor( (tm - 850) / 4 );
+        // let G = 35 + Math.floor( (tm - 850) / 10 );
+        // let B = 13;
+
+        // let R = 60 + Math.floor( (tm - 850) * 0.4 );
+        // let G = 1 + Math.floor( (tm - 850) * 0.85 );
+        // let B = 1 + Math.floor( (tm - 850) * 0.25 );
+
+        let R = 241 + Math.floor( (tm - 850) * 0.11 );
+        let G = 141 - Math.floor( (tm - 850) * 0.22 );
+        let B = 88 - Math.floor( (tm - 850) * 0.68 );
+        drawObject(parseFloat(r1), parseFloat(wt), parseFloat(h1), R, G ,B);
+    }
+
+    function drawObject(r1, wt, depth, R, G, B) {
+        const r2 = r1 - wt;
+        arcShape = new THREE.Shape().moveTo(1, 1)
+            .absarc(0, r1, r1, 0, Math.PI * 2, false);
+        holePath = new THREE.Path().moveTo(1, 1)
+            .absarc(0, r1, r2, 0, Math.PI * 2, true);
+        // .absarc( x, y, 半径, 星形缠绕, 端角, 顺时针 );
+        arcShape.holes.push(holePath);
+        const extrudeSettings = {
+            depth: depth,
+            curveSegments: 64,
+            bevelEnabled: true,
+            bevelSegments: 10, // 斜角
+            steps: 32,
+            bevelSize: 0.0001,
+            bevelThickness: 0
+        };
+        addShape(arcShape, extrudeSettings, R, G, B, 0, 100, 0, 0, 0, 0, 1);
+    }
+
+    function addShape(shape, extrudeSettings, R, G, B, x, y, z, rx, ry, rz, s) {
+        let geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        if(currentObject) {
+            currentObject.geometry.dispose();
+            material.color.setRGB(R/100, G/100, B/100);
+            currentObject.geometry = geometry;
+        } else {
+            material = new THREE.MeshPhongMaterial({ color: new THREE.Color(`rgb(222, 89, 33)`) });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = '空心圆柱体';
+            group.add(mesh);
+            currentObject = mesh;
+        }
+        window.currentObject = currentObject;
+        window.scene = scene;
+    }
+
+    function init() {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf0f0f0);
+
+        camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+        camera.position.set(4, 0, 2);
+        camera.up.set(0, 0, 1);
+        scene.add(camera);
+
+        const light = new THREE.PointLight(0xffffff, 0.8);
+        camera.add(light);
+
+        // // 添加不动的体
+        const geometryCylinder = new THREE.CylinderGeometry( 0.5375, 0.5375, 1, 64 );
+        const materialCylinder = new THREE.MeshPhongMaterial( { color: 0x909399 } );
+
+        let mesh1 = new THREE.Mesh( geometryCylinder, materialCylinder );
+        mesh1.castShadow = true;
+        mesh1.receiveShadow = true;
+        mesh1.position.set(0, -0.5375, 0.5);
+        mesh1.rotation.set(Math.PI * 0.5, 0, 0);
+        mesh1.name = '不动圆柱体';
+        scene.add( mesh1 );
+        window.mesh1 = mesh1;
+
+        // 添加挤压体
+        const geometryCylinder2 = new THREE.CylinderGeometry( 0.15, 0.15, 1, 64 );
+        const materialCylinder2 = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+
+        mesh2 = new THREE.Mesh( geometryCylinder2, materialCylinder2 );
+        mesh2.castShadow = true;
+        mesh2.receiveShadow = true;
+        mesh2.position.set(0, 0.45, 1.5);
+        mesh2.rotation.set(Math.PI * 0.5, 0, 0);
+        mesh2.name = '挤压圆柱体';
+        scene.add( mesh2 );
+        window.mesh2 = mesh2;
+        loadingCone();
+        group = new THREE.Group();
+        scene.add(group);
+
+
+        scene.add(new THREE.AxesHelper(1));
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+        controls = new OrbitControls( camera, renderer.domElement );
+
+        window.addEventListener('resize', onWindowResize);
+        drawObject(1091 / 2000, 260 / 1000, 344 / 1000, 60, 1, 1);
+    }
+
+    // 锥体参数设计
+    function loadingCone(r, h, y ,z) {
+        let coneRadius;
+        let coneHeight;
+        let coneY;
+        let coneZ;
+        if (r && h){
+            coneRadius = r;
+            coneHeight = h;
+
+        } else {
+            coneRadius = document.getElementById('coneRadius').value;
+            coneHeight = document.getElementById('coneHeight').value;
+        }
+        if(y && z){
+            coneY = y;
+            coneZ = z;
+        } else {
+            coneY = 2;
+            coneZ = 1;
+        }
+
+        // 上锥体
+        let geometryCylinder3 = new THREE.CylinderGeometry( 0, coneRadius,coneHeight, 64 );
+        if (mesh3) {
+            mesh3.geometry.dispose();
+            mesh3.geometry = geometryCylinder3;
+        } else {
+            group1 = new THREE.Group();
+            scene.add(group1);
+            // const material = new THREE.MeshBasicMaterial( { color: 0xffffff, envMap: textureCube } );
+            const materialCylinder3 = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+            mesh3 = new THREE.Mesh( geometryCylinder3, materialCylinder3 );
+            mesh3.castShadow = true;
+            mesh3.receiveShadow = true;
+            group1.add( mesh3 );
+            group1.position.set( 0, coneY + 0.4, coneZ );
+        }
+        // // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh3.position.set( 0, coneRadius, coneHeight / 2 );
+        mesh3.rotation.set( Math.PI * 0.5, 0, 0 );
+        // group1用于规定模型的整体旋转角度
+        group1.rotation.set( Math.PI * 0.5 + Math.atan(coneRadius/coneHeight), 0, 0 );
+
+        // 下锥体
+        let geometryCylinder4 = new THREE.CylinderGeometry( 0, coneRadius,coneHeight, 64 );
+        if (mesh4) {
+            mesh4.geometry.dispose();
+            mesh4.geometry = geometryCylinder4;
+        } else {
+            group2 = new THREE.Group();
+            scene.add(group2);
+            const materialCylinder4 = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+            mesh4 = new THREE.Mesh( geometryCylinder4, materialCylinder4 );
+            mesh4.castShadow = true;
+            mesh4.receiveShadow = true;
+            group2.add( mesh4 );
+            group2.position.set(0, coneY + 0.4, 0);
+        }
+        // // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh4.position.set(0, -coneRadius, coneHeight/2);
+        mesh4.rotation.set(Math.PI * 0.5, 0, 0);
+        // group1用于规定模型的整体旋转角度
+        group2.rotation.set(Math.PI * 0.5 - Math.atan(coneRadius/coneHeight), 0, 0);
+
+    }
+
+    function onWindowResize() {
+        windowHalfX = window.innerWidth / 2;
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        render();
+        // mesh1.rotation.y += 1 / Math.PI
+        // stats.update();
+    }
+    function render() {
+        group.rotation.y += (targetRotation - group.rotation.y) * 0.05;
+        renderer.render(scene, camera);
+    }
+</script>
+
+</body>
+
+</html>

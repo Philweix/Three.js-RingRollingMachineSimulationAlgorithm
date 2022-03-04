@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>锥体算法设计</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="./css/main.css">
+    <style>
+        body {
+            background-color: #f0f0f0;
+            color: #444;
+        }
+    </style>
+    <script type="text/javascript" src="./js/xlsx.core.min.js"></script>
+    <script type="text/javascript" src="./js/jquery.js"></script>
+</head>
+
+<body>
+
+<div style="position: absolute;">
+    <label>半径</label>
+    <input id="coneRadius" type="number" value="0.2" />
+    <label>高度</label>
+    <input id="coneHeight" type="number" value="0.6" />
+    <button id="loadingCone">加载锥体</button>
+</div>
+
+<script type="module">
+    import * as THREE from './js/three.module.js';
+    import { OrbitControls } from './js/OrbitControls.js';
+
+    let container, stats;
+    let camera, scene, renderer,controls;
+    let group, group1, group2
+    let targetRotation = 0;
+    let windowHalfX = window.innerWidth / 2;
+    let mesh3, geometryCylinder3;
+
+    init();
+
+    let loadTableDataDom = document.getElementById('loadingCone')
+    loadTableDataDom.addEventListener('click', loadingCone, false)
+
+    function loadingCone() {
+        let coneRadius = document.getElementById('coneRadius').value
+        let coneHeight = document.getElementById('coneHeight').value
+
+        // 上锥体
+        let geometryCylinder3 = new THREE.CylinderGeometry( 0, coneRadius,coneHeight, 64 );
+        mesh3.geometry.dispose();
+        mesh3.geometry = geometryCylinder3
+        // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh3.position.set(0, coneRadius, coneHeight/2);
+        mesh3.rotation.set(Math.PI * 0.5, 0, 0);
+        // group1用于规定模型的整体旋转角度
+        group1.position.set(0, 0, 0.2)
+        group1.rotation.set(Math.PI * 0.5 + Math.atan(coneRadius/coneHeight), 0, 0)
+
+        // 下锥体
+        let geometryCylinder4 = new THREE.CylinderGeometry( 0, coneRadius,coneHeight, 64 );
+        mesh4.geometry.dispose();
+        mesh4.geometry = geometryCylinder4
+        // // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh4.position.set(0, -coneRadius, coneHeight/2);
+        mesh4.rotation.set(Math.PI * 0.5, 0, 0);
+        // group1用于规定模型的整体旋转角度
+        group2.position.set(0, 0, -0.2)
+        group2.rotation.set(Math.PI * 0.5 - Math.atan(coneRadius/coneHeight), 0, 0)
+    }
+
+    animate();
+    function init() {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf0f0f0);
+
+        camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+        camera.position.set(0, 2, 5);
+        camera.up.set(0, 0, 1)
+        scene.add(camera);
+
+        const light = new THREE.PointLight(0xffffff, 0.8);
+        camera.add(light);
+
+        group1 = new THREE.Group();
+        scene.add(group1);
+
+        // 上锥体
+        geometryCylinder3 = new THREE.CylinderGeometry( 0, 0.5, Math.sqrt(0.75), 64 );
+        const materialCylinder3 = new THREE.MeshPhongMaterial( { color: 0xfd1111 } );
+
+        mesh3 = new THREE.Mesh( geometryCylinder3, materialCylinder3 );
+        mesh3.castShadow = true;
+        mesh3.receiveShadow = true;
+        // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh3.position.set(0, 0.5, Math.sqrt(0.75)/2);
+        // mesh3.rotation.set(Math.PI * 0.5, 0, 0);
+        // mesh3.rotation.set(Math.PI * 7 / 6, 0, 0);
+        window.mesh3 = mesh3;
+        // mesh3.rotation.set(0, 0, 0);
+        mesh3.name = '圆锥体1'
+        group1.add( mesh3 );
+
+        group1.position.set(0.4, 0, 0)
+        // group1.rotation.set(Math.PI * 2 / 3, 0, 0)
+        group1.rotation.set(0, 0, 0)
+        window.group1 = group1;
+
+        // 下锥体
+        group2 = new THREE.Group();
+        scene.add(group2);
+        const geometryCylinder4 = new THREE.CylinderGeometry( 0, 0.5, Math.sqrt(0.75), 64 );
+        const materialCylinder4 = new THREE.MeshPhongMaterial( { color: 0xfd1111 } );
+        let mesh4 = new THREE.Mesh( geometryCylinder4, materialCylinder4 );
+
+        mesh4.castShadow = true;
+        mesh4.receiveShadow = true;
+        // 将上锥体摆正并且 让group的点在锥体底圆的圆弧上
+        mesh4.position.set(0, 0.5, Math.sqrt(0.75)/2);
+        mesh4.rotation.set(Math.PI * 0.5, 0, 0);
+        window.mesh4 = mesh4;
+        mesh4.name = '圆锥体2'
+        group2.add( mesh4 );
+        window.group2 = group2;
+
+        group2.position.set(-0.4, 0, -Math.sqrt(0.75))
+        group2.rotation.set(Math.PI / 3, 0, 0)
+        window.group2 = group2;
+
+        scene.add(new THREE.AxisHelper(1));
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+        controls = new OrbitControls( camera, renderer.domElement );
+        window.addEventListener('resize', onWindowResize);
+
+    }
+
+    function onWindowResize() {
+        windowHalfX = window.innerWidth / 2;
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        render();
+    }
+
+    function render() {
+        group1.rotation.y += (targetRotation - group1.rotation.y) * 0.05;
+        renderer.render(scene, camera);
+    }
+
+</script>
+
+</body>
+
+</html>
